@@ -67,6 +67,8 @@ FRIDAY_ENABLED = _flag("FRIDAY_ENABLED", True)
 # smart  = conversa simples sai direto (⚡ FAST); código, CAD, cálculos e BOM sempre auditados
 # always = audita absolutamente tudo (mais lento)
 FRIDAY_MODE = _get("FRIDAY_MODE", "smart").lower()
+# FRIDAY_DEEP=1: raciocínio longo também ao revisar código (mais lento, ~80-100 s por resposta)
+FRIDAY_DEEP = _flag("FRIDAY_DEEP", False)
 
 # --- Kill switch ---
 KILL_HOTKEY = _get("KILL_HOTKEY", "f1")

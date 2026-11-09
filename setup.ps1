@@ -5,7 +5,9 @@ param(
     [switch]$SkipVoice,
     [switch]$SkipModels,
     [switch]$SkipOI,
-    [ValidateSet("7b", "14b")][string]$JarvisSize = "7b"
+    # Base do JARVIS e da FRIDAY (a mesma para os dois: um único modelo fica na VRAM).
+    # "qwen2.5:7b" é a opção leve antiga, para GPUs com menos de 10 GB.
+    [string]$BaseModel = "qwen3.5:9b"
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -16,7 +18,7 @@ Step "Ambiente virtual Python"
 if (-not (Test-Path .venv)) { python -m venv .venv }
 $py = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 & $py -m pip install --upgrade pip
-& $py -m pip install rich prompt_toolkit fastapi "uvicorn[standard]" websockets psutil nvidia-ml-py keyboard requests gspread google-auth pywhatkit
+& $py -m pip install rich prompt_toolkit fastapi "uvicorn[standard]" websockets psutil nvidia-ml-py keyboard requests gspread google-auth pywhatkit sympy
 
 if (-not $SkipVoice) {
     Step "Pipeline de voz (openWakeWord + Faster-Whisper CUDA + Piper)"
@@ -53,15 +55,14 @@ if (-not $SkipModels) {
     try { Invoke-RestMethod http://127.0.0.1:11434/api/version | Out-Null }
     catch { Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden; Start-Sleep 4 }
 
-    $jarvisBase = "qwen2.5:$JarvisSize"
-    ollama pull $jarvisBase
-    ollama pull deepseek-r1:8b
+    ollama pull $BaseModel
     ollama pull qwen2.5vl:7b
-    $mf = (Get-Content Modelfile_Jarvis -Raw) -replace "(?m)^FROM .*$", "FROM $jarvisBase"
-    $tmp = Join-Path $env:TEMP "Modelfile_Jarvis.tmp"
-    Set-Content $tmp $mf -Encoding utf8
-    ollama create jarvis -f $tmp
-    ollama create friday -f Modelfile_Friday
+    foreach ($name in "Jarvis", "Friday") {
+        $mf = (Get-Content "Modelfile_$name" -Raw) -replace "(?m)^FROM .*$", "FROM $BaseModel"
+        $tmp = Join-Path $env:TEMP "Modelfile_$name.tmp"
+        Set-Content $tmp $mf -Encoding utf8
+        ollama create $name.ToLower() -f $tmp
+    }
     ollama list
 }
 

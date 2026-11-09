@@ -22,7 +22,10 @@ BADGE_CORRECTED = "🛡️ Corrigido pela Friday [QA Status: CORRECTED]"
 BADGE_FLAGGED = "⚠️ Friday apontou ressalvas [QA Status: FLAGGED]"
 BADGE_SKIPPED = "⚠️ Friday indisponível [QA Status: SKIPPED]"
 BADGE_FAST = "⚡ Resposta rápida — conversa simples, sem auditoria [QA Status: FAST]"
-DEEP_KINDS = {"codigo", "fusion", "calculo", "bom"}
+# Raciocínio longo (think) só onde compensa; contas agora são executadas em Python (tool_math).
+# Código Python: com think a revisão leva ~80-100 s no 9b; sem think, poucos segundos.
+# FRIDAY_DEEP=1 no .env liga o raciocínio também para código.
+DEEP_KINDS = {"fusion", "bom"} | ({"codigo"} if config.FRIDAY_DEEP else set())
 
 KIND_GUIDE = {
     "codigo": "código Python: sintaxe, bugs, tratamento de erros, segurança, imports faltando",
@@ -35,6 +38,11 @@ KIND_GUIDE = {
     "calculo": "resposta de matemática/suprimentos: refaça cada conta, confira unidades, arredondamentos "
                "(quantidades de peças sempre para cima) e totais",
     "geral": "resposta técnica: exatidão dos fatos, cálculos, código e coerência com o pedido",
+    "calculo_py": "programa Python que resolve um problema de matemática, junto com a saída real da execução. "
+                  "Confira se o problema foi INTERPRETADO corretamente: fórmulas, unidades, porcentagem sobre a "
+                  "base certa, ordem das operações, arredondamentos e se a saída responde exatamente ao que foi "
+                  "perguntado. As contas em si já foram executadas e estão certas. A versão corrigida deve ser "
+                  "o programa Python completo num único bloco ```python",
 }
 FORMAT_RULE = ("A versão corrigida deve manter o MESMO formato, estilo e idioma do artefato original "
                "(texto continua texto, JSON continua JSON), alterando apenas o que estiver errado.")
@@ -89,12 +97,13 @@ def build_prompt(content: str, kind: str, context: str) -> str:
 
 
 def review(content: str, kind: str = "geral", context: str = "", *,
-           cancel=None, on_token=None) -> ReviewResult:
+           cancel=None, on_token=None, think: bool | None = None) -> ReviewResult:
     """Auditoria síncrona (chamar via thread). llm.Cancelled propaga para quem chamou."""
     if not config.FRIDAY_ENABLED:
         return ReviewResult("SKIPPED", content, "Friday desativada (FRIDAY_ENABLED=0)")
     msgs = [{"role": "user", "content": build_prompt(content, kind, context)}]
-    think = kind in DEEP_KINDS          # raciocínio longo só para código, CAD, cálculos e BOM
+    if think is None:
+        think = kind in DEEP_KINDS      # raciocínio longo só para código, CAD, cálculos e BOM
     try:
         try:
             res = llm.chat(config.FRIDAY_MODEL, msgs, options={"temperature": 0.2},
@@ -120,6 +129,8 @@ def review(content: str, kind: str = "geral", context: str = "", *,
     m = _CORRECTED_RE.search(out)
     notes = _CORRECTED_RE.sub("", out).replace("[REPROVADO]", "").strip()
     corrected = _clean_corrected(m.group(1)) if m else ""
+    if corrected and "```" in content and "```" not in corrected and kind in ("codigo", "fusion", "calculo_py"):
+        corrected = f"```python\n{corrected}\n```"     # a Friday às vezes devolve o código sem a cerca
     if corrected:
         log.warning("Friday: CORRECTED (%.1fs)", res["seconds"])
         return ReviewResult("CORRECTED", corrected, notes, res["seconds"], out)

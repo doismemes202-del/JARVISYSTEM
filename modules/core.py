@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
-from . import config, llm, telemetry, tool_fusion, tool_reviewer, tool_sheets, tool_whatsapp
+from . import config, llm, telemetry, tool_fusion, tool_math, tool_reviewer, tool_sheets, tool_whatsapp
 
 log = logging.getLogger("jarvis.core")
 
@@ -72,32 +72,77 @@ _KW_RE = {r: [re.compile(rf"\b{re.escape(k)}\b" if len(k) <= 3 else rf"\b{re.esc
 
 KIND_ACTION = {"codigo": "Auditando código", "fusion": "Auditando script do Fusion 360",
                "bom": "Auditando BOM e preços", "whatsapp": "Auditando mensagem",
-               "calculo": "Conferindo cálculos", "geral": "Auditando resposta"}
+               "calculo": "Conferindo cálculos", "calculo_py": "Conferindo a interpretação do cálculo",
+               "geral": "Auditando resposta"}
 
 
 def norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s.lower()).encode("ascii", "ignore").decode()
 
 
-def route(text: str) -> str:
+def addressed(text: str) -> str | None:
+    """Chamada direta: 'romeu, ...' / 'plato: ...' / 'ei monday ...'."""
     t = norm(text)
-    for role in ROLES:                                     # chamada direta: "romeu, ..." / "plato: ..."
+    for role in ROLES:
         if re.match(rf"\s*(ei\s+|hey\s+|ok\s+)?{role}\b", t):
             return role
+    return None
+
+
+def route(text: str) -> str:
+    """Roteamento por palavra-chave (reserva, quando o entendimento por IA falha)."""
+    direct = addressed(text)
+    if direct:
+        return direct
+    t = norm(text)
     scores = {r: sum(1 for rx in rxs if rx.search(t)) for r, rxs in _KW_RE.items()}
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "jarvis"
 
 
 _CALC_RE = re.compile(r"\d\s*[x×*/+=^-]\s*\d|\d+\s*%|\bR\$\s*\d")
+_LONG_RE = re.compile(r"\b(escrev|redij|redac|texto|artigo|resum|explique|explica|detalh|descrev|histori|"
+                      r"lista|compar|plano|roteiro|dissert|paragraf|palavras|post|e-?mail|carta|discurso)")
+
+# tipo de pedido → agente responsável
+TIPOS = ("conversa", "texto", "calculo", "codigo", "cad", "agenda")
+TIPO_AGENT = {"conversa": "jarvis", "texto": "jarvis", "calculo": "plato", "codigo": "romeu",
+              "cad": "papa", "agenda": "monday"}
+
+UNDERSTAND_PROMPT = """\
+Classifique o pedido do usuário para o assistente JARVIS. Responda somente com JSON.
+Tipos:
+- "conversa": cumprimento, bate-papo ou pergunta rápida que se responde em poucas frases.
+- "texto": pedido de texto longo ou explicação: redação, artigo, resumo, lista, história, e-mail, carta, \
+plano, roteiro, comparação, "explique em detalhes".
+- "calculo": qualquer conta ou problema numérico: porcentagem, juros, preços, conversão de unidades, \
+equação, geometria, física, rotação, quantidades, médias. Inclui perguntas de continuação de uma conta \
+anterior ("e se fosse 20%?").
+- "codigo": programação, scripts, erros de código, APIs.
+- "cad": Fusion 360, modelagem 3D, peças, usinagem, CNC, impressão 3D.
+- "agenda": WhatsApp, mensagens, agenda, lembretes, compromissos, rotina.
+{context}Pedido: {text}"""
+UNDERSTAND_SCHEMA = {"type": "object", "properties": {"tipo": {"type": "string", "enum": list(TIPOS)}},
+                     "required": ["tipo"]}
+
+HINTS = {
+    "conversa": "(Pergunta simples: responda de forma direta e natural, em poucas frases.)",
+    "texto": "(Pedido de texto: escreva uma resposta completa e bem desenvolvida, organizada em parágrafos "
+             "e títulos quando fizer sentido, com o tamanho que o pedido exige. Se o usuário pedir um número "
+             "de palavras, parágrafos ou itens, cumpra exatamente.)",
+}
 
 
-def is_simple_question(text: str, role: str) -> bool:
-    """Pergunta curta de conversa (ex.: 'que horas são?', 'tudo bem?', 'quem é você?')."""
-    return role in ("jarvis", "monday") and len(text) <= 120 and not _CALC_RE.search(text)
+def guess_tipo(text: str, role: str) -> str:
+    """Reserva por regras, quando o modelo não classifica."""
+    if role == "plato" or _CALC_RE.search(text):
+        return "calculo"
+    if role in ("romeu", "papa", "monday"):
+        return {"romeu": "codigo", "papa": "cad", "monday": "agenda"}[role]
+    return "texto" if _LONG_RE.search(norm(text)) or len(text) > 160 else "conversa"
 
 
-def needs_review(role: str, question: str, answer: str) -> bool:
+def needs_review(role: str, question: str, answer: str, tipo: str = "") -> bool:
     """FRIDAY_MODE=smart: só audita o que tem risco técnico real."""
     from . import config as _cfg
     if _cfg.FRIDAY_MODE == "always":
@@ -106,6 +151,8 @@ def needs_review(role: str, question: str, answer: str) -> bool:
         return True
     if role in ("romeu", "papa", "plato"):    # código, CAD e cálculos
         return True
+    if tipo in ("conversa", "texto"):         # textos e conversa saem direto (rápido)
+        return False
     if _CALC_RE.search(answer) or _CALC_RE.search(question):
         return True
     return len(answer) > 900                  # respostas longas/técnicas do JARVIS/MONDAY
@@ -209,15 +256,50 @@ class Engine:
         progress(agent, f"[{label}] {action}")
         msgs = [*self.memory] if history else []
         msgs.append({"role": "user", "content": prompt})
-        return llm.chat(config.JARVIS_MODEL, msgs, cancel=self.cancel,
-                        on_token=lambda n: progress(agent, f"[{label}] {action} · {n} tokens"), **kw)
+        kw.setdefault("think", False)          # qwen3.5 pensa por padrão; o JARVIS responde direto
+        try:
+            return llm.chat(config.JARVIS_MODEL, msgs, cancel=self.cancel,
+                            on_token=lambda n: progress(agent, f"[{label}] {action} · {n} tokens"), **kw)
+        except llm.LLMError as e:
+            if "think" not in str(e).lower() or kw.get("think") is None:
+                raise
+            kw.pop("think")                    # modelo antigo sem suporte a 'think'
+            return llm.chat(config.JARVIS_MODEL, msgs, cancel=self.cancel,
+                            on_token=lambda n: progress(agent, f"[{label}] {action} · {n} tokens"), **kw)
 
-    def _friday(self, content: str, kind: str, context: str, progress: Progress) -> tool_reviewer.ReviewResult:
+    def _recent(self, turns: int = 2) -> str:
+        """Últimas trocas da conversa, em texto (para pedidos de continuação)."""
+        items = list(self.memory)[-2 * turns:]
+        return "".join(f"{'Usuário' if m['role'] == 'user' else 'Assistente'}: {m['content'][:600]}\n"
+                       for m in items)
+
+    def understand(self, text: str, progress: Progress = _noop) -> str:
+        """Entende o tipo de pedido com o próprio modelo (mais preciso que palavras-chave)."""
+        progress("jarvis", "[JARVIS] Entendendo o pedido")
+        recent = self._recent(1)
+        ctx = f"Conversa anterior (só para contexto):\n{recent}\n" if recent else ""
+        try:
+            res = llm.chat(config.JARVIS_MODEL,
+                           [{"role": "user", "content": UNDERSTAND_PROMPT.format(context=ctx, text=text)}],
+                           fmt=UNDERSTAND_SCHEMA, options={"temperature": 0, "num_predict": 40},
+                           cancel=self.cancel, think=False, timeout=60)
+            tipo = json.loads(res["content"]).get("tipo")
+            if tipo in TIPOS:
+                log.info("Entendido: %s (%.2fs)", tipo, res["seconds"])
+                return tipo
+        except llm.Cancelled:
+            raise
+        except Exception as e:
+            log.info("Entendimento por IA falhou (%s) — usando regras.", e)
+        return guess_tipo(text, route(text))
+
+    def _friday(self, content: str, kind: str, context: str, progress: Progress,
+                think: bool | None = None) -> tool_reviewer.ReviewResult:
         if not config.FRIDAY_ENABLED:
             return tool_reviewer.ReviewResult("SKIPPED", content, "desativada")
         action = KIND_ACTION.get(kind, "Auditando")
         progress("friday", f"[FRIDAY] {action}")
-        rr = tool_reviewer.review(content, kind, context, cancel=self.cancel,
+        rr = tool_reviewer.review(content, kind, context, cancel=self.cancel, think=think,
                                   on_token=lambda n: progress("friday", f"[FRIDAY] {action} · {n} tokens"))
         if rr.status in ("CORRECTED", "FLAGGED") and rr.notes:
             log.info("FRIDAY: %s", rr.notes[:400])
@@ -241,22 +323,81 @@ class Engine:
 
     # ------------------------------------------------------------------ conversa
     def converse(self, text: str, progress: Progress = _noop, role: str | None = None) -> Reply:
-        role = role or route(text)
+        direct = role or addressed(text)
+        tipo = self.understand(text, progress)
+        role = direct or TIPO_AGENT[tipo]
+        log.info("Pedido: %s → %s", tipo, AGENTS[role]["label"])
+        if tipo == "calculo" and role in ("plato", "jarvis", "monday"):
+            try:
+                return self.solve_math(text, progress, "plato" if role == "jarvis" else role)
+            except llm.Cancelled:
+                raise
+            except Exception as e:                    # cálculo em Python falhou → resposta normal auditada
+                log.warning("Cálculo em Python falhou (%s) — respondendo sem execução.", e)
         info, label = ROLES[role], AGENTS[role]["label"]
-        log.info("Roteado → %s", label)
         content = f"{info['directive']}\n\n{text}" if info["directive"] else text
-        if is_simple_question(text, role):
-            content += "\n\n(Pergunta simples: responda de forma direta em no máximo 3 frases.)"
-        res = self._llm(role, content, progress, "Gerando resposta", history=True)
+        if tipo in HINTS and role in ("jarvis", "monday"):
+            content += "\n\n" + HINTS[tipo]
+        res = self._llm(role, content, progress, "Escrevendo resposta" if tipo == "texto" else "Gerando resposta",
+                        history=True)
         raw = llm.strip_think(res["content"])
         body = llm.strip_telemetry_all(raw)
-        if needs_review(role, text, body):
+        if needs_review(role, text, body, tipo):
             rr = self._friday(body, info["kind"], text, progress)
         else:
             rr = tool_reviewer.ReviewResult("FAST", body)
         self.memory.extend([{"role": "user", "content": text}, {"role": "assistant", "content": rr.text}])
         return Reply(role, rr.text, rr.status, rr.badge, self._signature(raw, label, res),
                      rr.notes if rr.status == "FLAGGED" else "", self._perf(label, res, rr))
+
+    # ------------------------------------------------------------------ matemática exata
+    def solve_math(self, text: str, progress: Progress = _noop, role: str = "plato") -> Reply:
+        """Conta feita por Python de verdade: modelo escreve o programa → FRIDAY confere a interpretação →
+        execução isolada → explicação com os números exatos."""
+        label = AGENTS[role]["label"]
+        recent = self._recent(2)
+        ask = f"{text}\n\n(Conversa anterior, para entender referências:\n{recent})" if recent else text
+        t_total, tokens = 0.0, 0
+
+        def gen(prompt: str, action: str) -> str:
+            nonlocal t_total, tokens
+            r = self._llm(role, prompt, progress, action, options={"temperature": 0.2})
+            t_total += r["seconds"]
+            tokens += r["tokens"]
+            return llm.strip_think(r["content"])
+
+        code = tool_math.extract_code(gen(tool_math.CODE_DIRECTIVE.format(ask=ask), "Montando o cálculo em Python"))
+        progress(role, f"[{label}] Executando o cálculo")
+        ok, out = tool_math.run(code)
+        if not ok:
+            code = tool_math.extract_code(gen(tool_math.FIX_DIRECTIVE.format(ask=ask, code=code, error=out),
+                                              "Corrigindo o cálculo"))
+            ok, out = tool_math.run(code)
+        if not ok:
+            raise RuntimeError(out)
+
+        # FRIDAY confere se o problema foi interpretado certo (as contas já são exatas)
+        rr = self._friday(f"```python\n{code}\n```\n\nSaída da execução:\n```text\n{out}\n```",
+                          "calculo_py", text, progress)
+        if rr.status == "CORRECTED":
+            new_code = tool_math.extract_code(rr.text)
+            progress(role, f"[{label}] Executando o cálculo corrigido pela FRIDAY")
+            ok2, out2 = tool_math.run(new_code)
+            if ok2:
+                code, out = new_code, out2
+            else:
+                log.warning("Correção da FRIDAY não executou (%s) — mantendo o cálculo original.", out2)
+                rr = tool_reviewer.ReviewResult("FLAGGED", rr.text, rr.notes, rr.seconds)
+
+        raw = gen(tool_math.EXPLAIN_DIRECTIVE.format(ask=ask, code=code, out=out), "Explicando o resultado")
+        body = llm.strip_telemetry_all(raw)
+        body += f"\n\n🧮 **Conta executada em Python** (resultado exato):\n```python\n{code}\n```"
+        self.memory.extend([{"role": "user", "content": text}, {"role": "assistant", "content": body}])
+        res = {"seconds": t_total, "tps": tokens / t_total if t_total else 0.0, "tokens": tokens}
+        status = rr.status if rr.status != "SKIPPED" else "SKIPPED"
+        return Reply(role, body, status, rr.badge, self._signature(raw, label, res),
+                     rr.notes if rr.status == "FLAGGED" else "", self._perf(label, res, rr),
+                     extra={"python_output": out})
 
     # ------------------------------------------------------------------ comandos
     def _slash(self, text: str, progress: Progress) -> Reply:

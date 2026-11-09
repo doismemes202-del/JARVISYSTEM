@@ -13,3 +13,5 @@ gspread
 google-auth
 pywhatkit
 # open-interpreter: instalar num venv Python 3.11 separado (ver README / setup.ps1)
+# PLATO: contas exatas executadas em Python (equações etc.)
+sympy

@@ -6,12 +6,12 @@ parada de emergência no F1.
 
 | Agente | Função | Onde |
 |---|---|---|
-| 🤖 **JARVIS** | orquestrador, voz, interface | `modules/core.py`, modelo `jarvis` |
+| 🤖 **JARVIS** | orquestrador, voz, interface | `modules/core.py`, modelo `jarvis` (qwen3.5:9b) |
 | 💼 **MONDAY** | WhatsApp, agenda, rotina | `modules/tool_whatsapp.py` |
 | 💻 **ROMEU** | Python, APIs, scripts | persona no modelo `jarvis` |
 | ⚙️ **PAPA** | Fusion 360, 3D, Open Interpreter `--os` | `modules/tool_fusion.py` |
-| 📊 **PLATO** | matemática, BOM no Google Sheets | `modules/tool_sheets.py` |
-| 🛡️ **FRIDAY** | QA/QC de toda saída técnica | `modules/tool_reviewer.py`, modelo `friday` |
+| 📊 **PLATO** | matemática (executada em Python), BOM no Google Sheets | `modules/tool_math.py` · `tool_sheets.py` |
+| 🛡️ **FRIDAY** | QA/QC de toda saída técnica | `modules/tool_reviewer.py`, modelo `friday` (qwen3.5:9b) |
 
 ## Estrutura
 
@@ -40,6 +40,7 @@ jarvis_system/
 cd C:\jarvis_system
 powershell -ExecutionPolicy Bypass -File .\setup.ps1             # tudo
 powershell -ExecutionPolicy Bypass -File .\setup.ps1 -SkipModels # modelos já baixados
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -BaseModel qwen2.5:7b   # GPU com menos de 10 GB
 ```
 
 O `setup.ps1` cria dois ambientes:
@@ -116,17 +117,41 @@ A voz vem ligada por padrão (`VOICE_ENABLED=1`). Há duas formas de falar:
 .\.venv\Scripts\python -m modules.voice_engine --say "Sistemas online, senhor."
 ```
 
-## Velocidade (FRIDAY inteligente)
+## Modelo e precisão
 
-`FRIDAY_MODE=smart` (padrão):
+JARVIS e FRIDAY usam a mesma base, **qwen3.5:9b** (9 bilhões de parâmetros, contexto de 16 mil
+tokens). Como a base é a mesma, o Ollama mantém um único modelo na VRAM (~6 GB) e troca de um para o
+outro sem recarregar. Os modelos antigos ficaram salvos como `jarvis-qwen25` e `friday-r1`.
 
-| Tipo de pergunta | Tratamento | Tempo |
+Cada pedido passa por três etapas:
+
+1. **Entendimento (~0,3 s):** o modelo classifica o pedido como conversa, texto, cálculo, código,
+   CAD ou agenda, e o agente certo assume. Chamar pelo nome (“Romeu, …”) continua valendo.
+2. **Cálculos exatos:** o PLATO escreve um programa Python e a FRIDAY confere se o problema foi
+   interpretado certo. O programa roda isolado (`modules/tool_math.py`) e a explicação usa os números
+   da execução. A conta aparece no fim da resposta.
+   - Só são aceitas bibliotecas de matemática (math, fractions, sympy etc.).
+   - Arquivos, rede e sistema ficam bloqueados.
+   - Erros de ponto flutuante (`1.2 // 0.4`) são corrigidos automaticamente.
+3. **Tamanho da resposta:** conversa sai curta e direta; pedidos de texto (“escreva”, “explique”,
+   “resuma”…) saem completos e respeitam o número de palavras pedido.
+
+| Tipo de pergunta | Tratamento | Tempo típico |
 |---|---|---|
-| Conversa simples, sem código e sem cálculo | Sai direto, com o selo **⚡ FAST** | ~1–3 s |
-| Código, Fusion, cálculos, BOM e respostas longas | Sempre auditados | Mais lento |
+| Conversa | Direto, com o selo **⚡ FAST** | 1–3 s |
+| Texto longo (300 palavras) | Direto | ~8 s |
+| Cálculo | Python + FRIDAY | 9–20 s |
+| Código (Romeu) | FRIDAY revisa | ~20 s |
+| Fusion e BOM | FRIDAY com raciocínio profundo | Mais lento |
 
-A FRIDAY só usa raciocínio profundo (`think`) em código, CAD, cálculos e BOM. Para auditar tudo,
-use `FRIDAY_MODE=always`.
+| Variável | Efeito |
+|---|---|
+| `FRIDAY_MODE=always` | Audita tudo, inclusive conversas e textos. |
+| `FRIDAY_DEEP=1` | A FRIDAY também “pensa” ao revisar código: mais rigorosa, porém ~80–100 s por resposta. |
+
+```powershell
+.\.venv\Scripts\python tests\test_accuracy.py    # entendimento, 6 contas, texto longo e código
+```
 
 ## Testes
 
