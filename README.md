@@ -98,12 +98,35 @@ Limitações:
 
 ## Voz
 
-A wake word pré-treinada é **“Hey Jarvis”**. Para usar “Ok Jarvis”, treine um modelo customizado do
-openWakeWord e configure `WAKEWORD_MODEL=...onnx`.
+A voz vem ligada por padrão (`VOICE_ENABLED=1`). Há duas formas de falar:
+
+1. **F2 (push-to-talk, recomendado):** aperte F2 em qualquer janela, espere o bipe, fale e
+   fique 1 s em silêncio.
+2. **Mãos livres:** diga **“Rêi DJÁR-vis”**. O modelo “Hey Jarvis” do openWakeWord foi treinado
+   com a pronúncia americana. “Jarvis” falado com o J de “janela” tira nota de 0,03 a 0,16 (o limiar
+   é 0,35); com o J de “Djalma”, a nota fica acima de 0,9.
+
+| Comando / variável | Para que serve |
+|---|---|
+| `/voice test` | Grava 6 s e mede o volume do microfone, a nota da palavra de ativação e a transcrição. Sugere ajustes. |
+| `WAKEWORD_THRESHOLD` (padrão 0,35) | Suba para 0,5 se o JARVIS disparar sozinho; baixe se ele não reconhecer você. |
 
 ```powershell
+.\.venv\Scripts\python tests\test_voice.py     # teste completo com microfone simulado
 .\.venv\Scripts\python -m modules.voice_engine --say "Sistemas online, senhor."
 ```
+
+## Velocidade (FRIDAY inteligente)
+
+`FRIDAY_MODE=smart` (padrão):
+
+| Tipo de pergunta | Tratamento | Tempo |
+|---|---|---|
+| Conversa simples, sem código e sem cálculo | Sai direto, com o selo **⚡ FAST** | ~1–3 s |
+| Código, Fusion, cálculos, BOM e respostas longas | Sempre auditados | Mais lento |
+
+A FRIDAY só usa raciocínio profundo (`think`) em código, CAD, cálculos e BOM. Para auditar tudo,
+use `FRIDAY_MODE=always`.
 
 ## Testes
 

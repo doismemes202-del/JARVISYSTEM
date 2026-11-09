@@ -60,7 +60,8 @@ ROLES: dict[str, dict] = {
     "plato": {
         "kind": "calculo",
         "directive": "[SUBSISTEMA PLATO ATIVO] Responda como PLATO, matemático e gestor de suprimentos. "
-                     "Mostre cálculos passo a passo, unidades e totais. Valores monetários em R$.",
+                     "Mostre cálculos passo a passo, unidades e totais. Valores monetários em R$. "
+                     "Não use LaTeX: escreva as contas em texto simples (ex.: 2400 × 0,15 = 360).",
         "kw": ["calcul", "bom", "material", "lista de", "custo", "orcament", "planilha", "sheets",
                "matemat", "equac", "quantidade", "quantos", "quantas", "preco", "fornecedor", "suprimento",
                "converter", "estoque", "parafuso", "porcentagem", "reserva", "media"]},
@@ -88,6 +89,28 @@ def route(text: str) -> str:
     return best if scores[best] > 0 else "jarvis"
 
 
+_CALC_RE = re.compile(r"\d\s*[x×*/+=^-]\s*\d|\d+\s*%|\bR\$\s*\d")
+
+
+def is_simple_question(text: str, role: str) -> bool:
+    """Pergunta curta de conversa (ex.: 'que horas são?', 'tudo bem?', 'quem é você?')."""
+    return role in ("jarvis", "monday") and len(text) <= 120 and not _CALC_RE.search(text)
+
+
+def needs_review(role: str, question: str, answer: str) -> bool:
+    """FRIDAY_MODE=smart: só audita o que tem risco técnico real."""
+    from . import config as _cfg
+    if _cfg.FRIDAY_MODE == "always":
+        return True
+    if "```" in answer:                       # qualquer código
+        return True
+    if role in ("romeu", "papa", "plato"):    # código, CAD e cálculos
+        return True
+    if _CALC_RE.search(answer) or _CALC_RE.search(question):
+        return True
+    return len(answer) > 900                  # respostas longas/técnicas do JARVIS/MONDAY
+
+
 def is_kill(text: str) -> bool:
     words = re.findall(r"[a-z/]+", norm(text))
     return 0 < len(words) <= 3 and any(w.strip("/") in ("kill", "abort", "abortar") for w in words)
@@ -106,7 +129,8 @@ HELP = """\
 | `/fusion placa c=100 l=60 e=5 furo=5 margem=8` | script parametrizado (template) |
 | `/fusion <descrição>` | PAPA escreve script Fusion 360 → FRIDAY → pasta Scripts |
 | `/os <instrução>` | Open Interpreter `--os` com visão local em console próprio |
-| `/status` · `/agents` · `/clear` · `/voice on\\|off` | telemetria · agentes · memória · voz |
+| `/status` · `/agents` · `/clear` | telemetria · agentes · memória |
+| `/voice on\\|off` · `/voice test` | liga/desliga a voz (“Hey Jarvis”) · diagnóstico do microfone |
 | `/kill` · **F1** · `kill` | ☠ PARADA DE EMERGÊNCIA (cancela tudo → IDLE) |
 | `/shutdown` | encerra JARVIS, Ollama e ferramentas |"""
 
@@ -221,9 +245,15 @@ class Engine:
         info, label = ROLES[role], AGENTS[role]["label"]
         log.info("Roteado → %s", label)
         content = f"{info['directive']}\n\n{text}" if info["directive"] else text
+        if is_simple_question(text, role):
+            content += "\n\n(Pergunta simples: responda de forma direta em no máximo 3 frases.)"
         res = self._llm(role, content, progress, "Gerando resposta", history=True)
         raw = llm.strip_think(res["content"])
-        rr = self._friday(llm.strip_telemetry_all(raw), info["kind"], text, progress)
+        body = llm.strip_telemetry_all(raw)
+        if needs_review(role, text, body):
+            rr = self._friday(body, info["kind"], text, progress)
+        else:
+            rr = tool_reviewer.ReviewResult("FAST", body)
         self.memory.extend([{"role": "user", "content": text}, {"role": "assistant", "content": rr.text}])
         return Reply(role, rr.text, rr.status, rr.badge, self._signature(raw, label, res),
                      rr.notes if rr.status == "FLAGGED" else "", self._perf(label, res, rr))

@@ -109,12 +109,21 @@ def speakable(text: str, limit: int = 600) -> str:
 
 
 # ====================================================================== Engine
+SPEECH_FLOOR = 180.0          # RMS mínimo de fala (int16) — headsets com ganho baixo ficam ~200-600
+
+
 class VoiceEngine(threading.Thread):
-    def __init__(self, on_command: Callable[[str], None]) -> None:
+    """on_event(tipo, info) recebe: ready, wake, listening, heard, nothing, error — para o front-end
+    mostrar ao usuário o que o microfone está fazendo."""
+
+    def __init__(self, on_command: Callable[[str], None],
+                 on_event: Callable[[str, str], None] | None = None) -> None:
         super().__init__(daemon=True, name="voice-engine")
         self.on_command = on_command
+        self.on_event = on_event or (lambda kind, info: None)
         self.tts = PiperTTS()
         self._stop_evt = threading.Event()
+        self._ptt = threading.Event()           # push-to-talk (F2): ouvir sem precisar da wake word
         self._speaking = threading.Event()
         self._noise = 300.0
         self.ready = threading.Event()
@@ -164,7 +173,7 @@ class VoiceEngine(threading.Thread):
 
     def _record_utterance(self, stream):
         import numpy as np
-        threshold = max(self._noise * 3.0, 450.0)
+        threshold = min(max(self._noise * 3.0, SPEECH_FLOOR), 900.0)   # teto: nunca exige fala gritada
         chunks, started, silent, t0 = [], False, 0.0, time.time()
         frame_s = FRAME / SAMPLE_RATE
         while not self._stop_evt.is_set():
@@ -198,38 +207,60 @@ class VoiceEngine(threading.Thread):
         except Exception as e:
             self.error = str(e)
             log.error("Voz desativada — dependências ausentes/falha: %s", e)
+            self.ready.set()
             return
 
-        log.info("🎙  Escuta ativa. Diga '%s'.", config.WAKEWORD_MODEL.replace("_", " "))
+        try:
+            stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME)
+            stream.start()
+        except Exception as e:
+            self.error = f"Microfone indisponível: {e}"
+            log.error(self.error)
+            self.ready.set()
+            return
+        self.mic_name = sd.query_devices(kind="input")["name"]
+        log.info("🎙  Escuta ativa (%s). Diga 'Hey Jarvis'.", self.mic_name)
         self.ready.set()
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME) as stream:
+        self.on_event("ready", self.mic_name)
+        with stream:
             while not self._stop_evt.is_set():
                 frame = stream.read(FRAME)[0][:, 0]
                 if self._speaking.is_set():
                     continue                       # evita o Jarvis ouvir a própria voz
-                self._noise = 0.95 * self._noise + 0.05 * self._rms(frame)
+                level = self._rms(frame)
+                if level < max(self._noise * 2.0, 300.0):   # só aprende ruído de fundo, nunca a fala
+                    self._noise = 0.95 * self._noise + 0.05 * level
                 scores = oww.predict(frame)
-                if not scores or max(scores.values()) < config.WAKEWORD_THRESHOLD:
+                score = max(scores.values()) if scores else 0.0
+                if self._ptt.is_set():
+                    self._ptt.clear()
+                    self.on_event("wake", "F2")
+                elif score >= config.WAKEWORD_THRESHOLD:
+                    log.info("Wake word detectada (%.2f).", score)
+                    self.on_event("wake", f"{score:.2f}")
+                else:
                     continue
-
-                log.info("Wake word detectada (%.2f).", max(scores.values()))
                 oww.reset()
                 self._beep()
+                self.on_event("listening", "")
                 audio = self._record_utterance(stream)
                 if audio is None:
-                    log.info("Nenhuma fala após a wake word.")
+                    self.on_event("nothing", "não ouvi nada depois do 'Hey Jarvis' — fale logo após o bipe")
                     continue
                 try:
                     text = self._transcribe(whisper, audio)
                 except Exception as e:
-                    log.error("Falha na transcrição: %s", e)
+                    self.on_event("error", f"falha na transcrição: {e}")
                     continue
-                if text:
-                    log.info("🗣  \"%s\"", text)
-                    try:
-                        self.on_command(text)
-                    except Exception:
-                        log.exception("Erro no callback de voz")
+                if not text:
+                    self.on_event("nothing", "o áudio não tinha fala reconhecível")
+                    continue
+                log.info("🗣  \"%s\"", text)
+                self.on_event("heard", text)
+                try:
+                    self.on_command(text)
+                except Exception:
+                    log.exception("Erro no callback de voz")
 
     def say(self, text: str) -> None:
         """Fala (bloqueante) com o microfone silenciado."""
@@ -245,8 +276,56 @@ class VoiceEngine(threading.Thread):
             time.sleep(0.2)
             self._speaking.clear()
 
+    def listen_now(self) -> None:
+        """Push-to-talk: começa a gravar o próximo comando imediatamente (sem wake word)."""
+        if not self._speaking.is_set():
+            self._ptt.set()
+
     def stop(self) -> None:
         self._stop_evt.set()
+
+
+def diagnose(seconds: float = 6.0, on_tick: Callable[[float, float, float], None] | None = None) -> dict:
+    """/voice test — grava `seconds` do microfone e mede tudo que importa para a voz funcionar:
+    nível do microfone, nota da wake word ("Hey Jarvis") e a transcrição do Whisper.
+    on_tick(segundos_decorridos, rms_atual, nota_wake) é chamado a cada 80 ms."""
+    import numpy as np
+    import sounddevice as sd
+
+    eng = VoiceEngine(lambda t: None)
+    oww = eng._load_wakeword()
+    whisper = eng._load_whisper()
+    mic = sd.query_devices(kind="input")["name"]
+    frames, rms, best = [], [], 0.0
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME) as stream:
+        n = int(seconds * SAMPLE_RATE / FRAME)
+        for i in range(n):
+            f = stream.read(FRAME)[0][:, 0]
+            frames.append(f)
+            r = eng._rms(f)
+            rms.append(r)
+            s = max(oww.predict(f).values() or [0.0])
+            best = max(best, s)
+            if on_tick:
+                on_tick((i + 1) * FRAME / SAMPLE_RATE, r, s)
+    audio = np.concatenate(frames)
+    noise = float(np.percentile(rms, 20))
+    peak = float(np.percentile(rms, 98))
+    text = eng._transcribe(whisper, audio)
+    problems = []
+    if peak < SPEECH_FLOOR and text:
+        problems.append(f"microfone baixo (pico {peak:.0f}): funciona, mas aumentar o volume de entrada em "
+                        f"Configurações → Sistema → Som → {mic} deixa a detecção mais confiável")
+    elif peak < SPEECH_FLOOR:
+        problems.append(f"microfone muito baixo (pico {peak:.0f} < {SPEECH_FLOOR:.0f}): aumente o volume de "
+                        f"entrada em Configurações → Sistema → Som → {mic}")
+    if best < config.WAKEWORD_THRESHOLD:
+        problems.append(f"'Hey Jarvis' não reconhecido (nota {best:.2f} < limiar {config.WAKEWORD_THRESHOLD}): "
+                        f"pronuncie à americana 'Rêi DJÁR-vis' (J de 'Djalma') ou use a tecla F2 para falar")
+    if not text:
+        problems.append("o Whisper não reconheceu fala no áudio")
+    return {"mic": mic, "noise": noise, "peak": peak, "wake": best, "threshold": config.WAKEWORD_THRESHOLD,
+            "text": text, "problems": problems}
 
 
 if __name__ == "__main__":

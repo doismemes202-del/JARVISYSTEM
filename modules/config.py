@@ -61,9 +61,12 @@ OLLAMA_URL = _get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 JARVIS_MODEL = _get("JARVIS_MODEL", "jarvis")
 FRIDAY_MODEL = _get("FRIDAY_MODEL", "friday")
 VISION_MODEL = _get("VISION_MODEL", "qwen2.5vl:7b")
-OLLAMA_KEEP_ALIVE = _get("OLLAMA_KEEP_ALIVE", "10m")
+OLLAMA_KEEP_ALIVE = _get("OLLAMA_KEEP_ALIVE", "30m")
 LLM_TIMEOUT = float(_get("LLM_TIMEOUT", "600"))
 FRIDAY_ENABLED = _flag("FRIDAY_ENABLED", True)
+# smart  = conversa simples sai direto (⚡ FAST); código, CAD, cálculos e BOM sempre auditados
+# always = audita absolutamente tudo (mais lento)
+FRIDAY_MODE = _get("FRIDAY_MODE", "smart").lower()
 
 # --- Kill switch ---
 KILL_HOTKEY = _get("KILL_HOTKEY", "f1")
@@ -72,9 +75,9 @@ KILL_OLLAMA = _flag("KILL_OLLAMA", True)
 KILL_DRY_RUN = _flag("JARVIS_KILL_DRY_RUN", False)
 
 # --- Voz ---
-VOICE_ENABLED = _flag("VOICE_ENABLED", False)
+VOICE_ENABLED = _flag("VOICE_ENABLED", True)
 WAKEWORD_MODEL = _get("WAKEWORD_MODEL", "hey_jarvis")
-WAKEWORD_THRESHOLD = float(_get("WAKEWORD_THRESHOLD", "0.5"))
+WAKEWORD_THRESHOLD = float(_get("WAKEWORD_THRESHOLD", "0.35"))   # 0.35 tolera sotaque PT-BR
 WHISPER_MODEL = _get("WHISPER_MODEL", "small")
 WHISPER_DEVICE = _get("WHISPER_DEVICE", "cuda")
 WHISPER_LANGUAGE = _get("WHISPER_LANGUAGE", "pt")

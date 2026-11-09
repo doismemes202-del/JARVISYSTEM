@@ -21,6 +21,8 @@ BADGE_PASSED = "🛡️ Revisado e Aprovado pela Friday [QA Status: PASSED]"
 BADGE_CORRECTED = "🛡️ Corrigido pela Friday [QA Status: CORRECTED]"
 BADGE_FLAGGED = "⚠️ Friday apontou ressalvas [QA Status: FLAGGED]"
 BADGE_SKIPPED = "⚠️ Friday indisponível [QA Status: SKIPPED]"
+BADGE_FAST = "⚡ Resposta rápida — conversa simples, sem auditoria [QA Status: FAST]"
+DEEP_KINDS = {"codigo", "fusion", "calculo", "bom"}
 
 KIND_GUIDE = {
     "codigo": "código Python: sintaxe, bugs, tratamento de erros, segurança, imports faltando",
@@ -50,8 +52,8 @@ class ReviewResult:
 
     @property
     def badge(self) -> str:
-        return {"PASSED": BADGE_PASSED, "CORRECTED": BADGE_CORRECTED,
-                "FLAGGED": BADGE_FLAGGED}.get(self.status, BADGE_SKIPPED)
+        return {"PASSED": BADGE_PASSED, "CORRECTED": BADGE_CORRECTED, "FLAGGED": BADGE_FLAGGED,
+                "FAST": BADGE_FAST}.get(self.status, BADGE_SKIPPED)
 
     @property
     def approved(self) -> bool:
@@ -91,9 +93,18 @@ def review(content: str, kind: str = "geral", context: str = "", *,
     """Auditoria síncrona (chamar via thread). llm.Cancelled propaga para quem chamou."""
     if not config.FRIDAY_ENABLED:
         return ReviewResult("SKIPPED", content, "Friday desativada (FRIDAY_ENABLED=0)")
+    msgs = [{"role": "user", "content": build_prompt(content, kind, context)}]
+    think = kind in DEEP_KINDS          # raciocínio longo só para código, CAD, cálculos e BOM
     try:
-        res = llm.chat(config.FRIDAY_MODEL, [{"role": "user", "content": build_prompt(content, kind, context)}],
-                       options={"temperature": 0.2}, cancel=cancel, on_token=on_token)
+        try:
+            res = llm.chat(config.FRIDAY_MODEL, msgs, options={"temperature": 0.2},
+                           cancel=cancel, on_token=on_token, think=think)
+        except llm.LLMError as e:
+            if "think" not in str(e).lower():
+                raise
+            # modelo sem suporte a 'think' (ex.: qwen2.5-coder) → tenta sem o parâmetro
+            res = llm.chat(config.FRIDAY_MODEL, msgs, options={"temperature": 0.2},
+                           cancel=cancel, on_token=on_token)
     except llm.LLMError as e:
         log.warning("Friday offline: %s", e)
         return ReviewResult("SKIPPED", content, str(e))

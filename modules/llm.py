@@ -23,7 +23,8 @@ class Cancelled(RuntimeError):
 def chat(model: str, messages: list[dict], *, fmt: str | None = None,
          options: dict | None = None, timeout: float | None = None,
          cancel: threading.Event | None = None,
-         on_token: Callable[[int], None] | None = None) -> dict:
+         on_token: Callable[[int], None] | None = None,
+         think: bool | None = None) -> dict:
     """Chat com o Ollama. Retorna o texto completo + métricas de desempenho.
 
     Usa streaming internamente: a cada token verifica `cancel`; se estiver setado, fecha a
@@ -42,6 +43,8 @@ def chat(model: str, messages: list[dict], *, fmt: str | None = None,
         payload["format"] = fmt
     if options:
         payload["options"] = options
+    if think is not None:                 # modelos de raciocínio (deepseek-r1): liga/desliga o <think>
+        payload["think"] = think
 
     if cancel is not None and cancel.is_set():
         raise Cancelled()

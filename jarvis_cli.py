@@ -47,8 +47,10 @@ QA_STYLE = {
     "CORRECTED": ("🛡️ QA Status: CORRECTED — corrigido pela Friday", "bold #ffd60a"),
     "FLAGGED": ("⚠️ QA Status: FLAGGED — ver ressalvas", "bold #ff9f1c"),
     "SKIPPED": ("⚠️ QA Status: SKIPPED — Friday indisponível", "dim"),
+    "FAST": ("⚡ Resposta rápida — conversa simples", "bold #00e5ff"),
 }
-LOCAL_COMMANDS = ["/status", "/agents", "/kill", "/shutdown", "/voice on", "/voice off", "/cls", "/exit"]
+LOCAL_COMMANDS = ["/status", "/agents", "/kill", "/shutdown", "/voice on", "/voice off", "/voice test",
+                  "/cls", "/exit"]
 ENGINE_COMMANDS = ["/help", "/clear", "/agent ", "/bom ", "/zapbom ", "/zap ", "/send", "/cancel",
                    "/whatsapp ", "/fusion placa c=100 l=60 e=5 furo=5 margem=8", "/fusion ", "/os "]
 
@@ -132,7 +134,8 @@ def banner(web_url: str | None = None) -> None:
     console.print(Text.assemble(
         ("  [F1] ", "bold white on #b0001e"),
         (" Pressione F1 para PARADA DE EMERGÊNCIA (KILL SWITCH)", "bold #ff6b81")))
-    console.print(Text("  /help comandos · /agents agentes · /status telemetria · /exit sair\n", style="dim"))
+    console.print(Text("  /help comandos · /agents agentes · /status telemetria · /voice on falar por voz · /exit sair\n",
+                       style="dim"))
     if not online:
         console.print(Text("  ⚠ Ollama offline — rode `ollama serve` (ou start_jarvis.ps1).\n", style="#ffd60a"))
 
@@ -154,11 +157,24 @@ def _guess_lang(code: str) -> str:
     return "text"
 
 
+_LATEX = [(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2"), (r"\\text\{([^{}]*)\}", r"\1"),
+          (r"\\(?:times|cdot)", "×"), (r"\\approx", "≈"), (r"\\div", "÷"), (r"\\pi", "π"),
+          (r"\\sqrt\{([^{}]*)\}", r"√(\1)"), (r"\\%", "%"), (r"\\,|\\;|\\!", " "), (r"\\\$", "$"),
+          (r"\\left|\\right", ""), (r"\\\[|\\\]|\\\(|\\\)", "")]
+
+
+def delatex(text: str) -> str:
+    """Fórmulas LaTeX que o modelo escreve viram texto legível no terminal (2400 × 0,15 = 360)."""
+    for pat, rep in _LATEX:
+        text = re.sub(pat, rep, text)
+    return text
+
+
 def render_body(text: str):
     """Texto → Markdown; blocos ``` → Syntax com destaque e números de linha."""
     parts, pos = [], 0
     for m in _CODE_RE.finditer(text):
-        prose = text[pos:m.start()].strip()
+        prose = delatex(text[pos:m.start()]).strip()
         if prose:
             parts.append(Markdown(prose, code_theme="monokai"))
         lang = _LANG_ALIAS.get(m.group(1).lower(), m.group(1).lower()) or "text"
@@ -170,7 +186,7 @@ def render_body(text: str):
                            title=Text(f" {lang} ", style="dim"), title_align="right",
                            border_style="#2b3240", box=box.ROUNDED, padding=(0, 1)))
         pos = m.end()
-    tail = text[pos:].strip()
+    tail = delatex(text[pos:]).strip()
     if tail:
         parts.append(Markdown(tail, code_theme="monokai"))
     return Group(*parts) if parts else Text("")
@@ -375,6 +391,31 @@ def run(text: str, speak: bool = False) -> None:
             threading.Thread(target=state.voice.say, args=(box_["reply"].body,), daemon=True).start()
 
 
+PTT_KEY = "f2"
+
+VOICE_EVENTS = {
+    "wake": ("🎙 Hey Jarvis detectado", "bold #39ff88"),
+    "listening": ("🔴 Ouvindo… fale o comando (pausa de 1s encerra)", "bold #ff6b81"),
+    "heard": ("🗣 Entendi", "bold #39ff88"),
+    "nothing": ("🎙 ", "#ffd60a"),
+    "error": ("🎙 Erro de voz: ", "bold #ff3b5f"),
+}
+
+
+def voice_event(kind: str, info: str) -> None:
+    """Mostra acima do prompt o que o microfone está fazendo."""
+    if kind not in VOICE_EVENTS:
+        return
+    label, style = VOICE_EVENTS[kind]
+    if kind == "wake":
+        msg = "🎙 F2 — pode falar" if info == "F2" else f"{label} (confiança {info})"
+    elif kind == "heard":
+        msg = f"{label}: “{info}”"
+    else:
+        msg = label + info
+    console.print(Text(f"  {msg}", style=style))
+
+
 def toggle_voice(on: bool) -> None:
     if on and not state.voice:
         from modules.voice_engine import VoiceEngine
@@ -385,19 +426,92 @@ def toggle_voice(on: bool) -> None:
             if app and app.is_running:
                 app.loop.call_soon_threadsafe(functools.partial(app.exit, result="\x00voice"))
 
-        state.voice = VoiceEngine(heard)
+        state.voice = VoiceEngine(heard, on_event=voice_event)
         state.voice.start()
-        with console.status("Carregando Whisper + openWakeWord…", spinner="dots12", spinner_style="#00e5ff"):
-            state.voice.ready.wait(90)
-        if state.voice.error:
-            render_error(state.voice.error, "VOZ")
+        with console.status("Carregando Whisper + openWakeWord… (≈15 s na primeira vez)",
+                            spinner="dots12", spinner_style="#00e5ff"):
+            state.voice.ready.wait(120)
+        if state.voice.error or not state.voice.is_alive():
+            render_error(f"{state.voice.error or 'motor de voz parou'}\n\nRode /voice test para diagnosticar.", "VOZ")
             state.voice = None
         else:
-            console.print(Text("  🎙 Voz ativa — diga “Hey Jarvis”.", style="bold #39ff88"))
+            ptt = ""
+            try:                                 # F2 global = falar agora (push-to-talk)
+                import keyboard
+                state.ptt_handle = keyboard.add_hotkey(PTT_KEY, state.voice.listen_now, suppress=False)
+                ptt = " (em qualquer janela)"
+            except Exception as e:
+                log.warning("F2 global indisponível (%s) — F2 só funciona com o JARVIS em foco.", e)
+            console.print(Panel(Text.assemble(
+                ("🎙 Voz ativa", "bold #39ff88"), (f"  ·  microfone: {getattr(state.voice, 'mic_name', '?')}\n\n", "dim"),
+                ("Opção 1 — mais fácil: ", "bold"), ("aperte F2", "bold #00e5ff"), (ptt, "dim"),
+                (", espere o bipe e fale.\n", ""),
+                ("Opção 2 — mãos livres: ", "bold"), ("diga “Rêi DJÁR-vis”", "bold #00e5ff"),
+                (" — pronúncia americana, J de “Djalma”; o “Jarvis” com J de “janela” não é reconhecido.\n\n", "dim"),
+                ("Depois do bipe: fale o comando e fique 1 s em silêncio. ", ""),
+                ("Problemas? ", "dim"), ("/voice test", "bold #ffd60a")),
+                border_style="#39ff88", box=box.ROUNDED, padding=(0, 2)))
     elif not on and state.voice:
+        if getattr(state, "ptt_handle", None) is not None:
+            import keyboard
+            try:
+                keyboard.remove_hotkey(state.ptt_handle)
+            except (KeyError, ValueError):
+                pass
+            state.ptt_handle = None
         state.voice.stop()
         state.voice = None
         console.print(Text("  🎙 Voz desligada.", style="dim"))
+
+
+def voice_test() -> None:
+    """Diagnóstico guiado do microfone + wake word + Whisper."""
+    from modules import voice_engine
+    secs = 6.0
+    console.print(Panel(Text.assemble(
+        ("Quando a barra começar, diga em voz normal:\n\n", ""),
+        ("   “Hey Jarvis, que horas são?”\n\n", "bold #00e5ff"),
+        (f"Gravação de {secs:.0f} segundos. Carregando modelos…", "dim")),
+        title=Text(" 🎙 TESTE DE VOZ ", style="bold #39ff88"), title_align="left",
+        border_style="#39ff88", box=box.ROUNDED, padding=(1, 2)))
+    from rich.live import Live
+    view = {"t": 0.0, "rms": 0.0, "wake": 0.0, "best": 0.0}
+
+    def frame() -> Text:
+        lvl = min(100.0, view["rms"] / 30)       # ~3000 RMS = fala forte
+        return Text.assemble(("  🎙 nível  ", "dim"), bar(lvl, 26), ("   wake ", "dim"),
+                             (f"{view['wake']:.2f}", "bold #39ff88" if view["wake"] >= config.WAKEWORD_THRESHOLD else "bold"),
+                             (f" (máx {view['best']:.2f})", "dim"), (f"   {view['t']:.1f}/{secs:.0f}s", "dim"))
+
+    def tick(t: float, rms: float, wake: float) -> None:
+        view.update(t=t, rms=rms, wake=wake, best=max(view["best"], wake))
+        live.update(frame())
+
+    try:
+        with Live(Text("  carregando Whisper + openWakeWord…", style="dim"), console=console,
+                  refresh_per_second=12, transient=False) as live:
+            r = voice_engine.diagnose(secs, tick)
+    except Exception as e:
+        render_error(f"{type(e).__name__}: {e}", "TESTE DE VOZ")
+        return
+
+    t = Table.grid(padding=(0, 2))
+    t.add_column(style="#5fa8b8", justify="right")
+    t.add_column()
+    ok = lambda b: Text("✔", style="bold #39ff88") if b else Text("✘", style="bold #ff3b5f")
+    t.add_row("Microfone", Text(r["mic"]))
+    t.add_row("Ruído / pico", Text.assemble(ok(r["peak"] >= voice_engine.SPEECH_FLOOR),
+                                            f"  {r['noise']:.0f} / {r['peak']:.0f}  (fala precisa > {voice_engine.SPEECH_FLOOR:.0f})"))
+    t.add_row("Hey Jarvis", Text.assemble(ok(r["wake"] >= r["threshold"]), f"  nota {r['wake']:.2f}  (limiar {r['threshold']})"))
+    t.add_row("Whisper", Text.assemble(ok(bool(r["text"])), f"  “{r['text'] or '—'}”"))
+    body = [t]
+    if r["problems"]:
+        body += [Text(), Text("Ajustes sugeridos:", style="bold #ffd60a")]
+        body += [Text(f" • {p}", style="#ffd60a") for p in r["problems"]]
+    else:
+        body += [Text(), Text("Tudo certo — a voz deve funcionar. Ligue com /voice on.", style="bold #39ff88")]
+    console.print(Panel(Group(*body), title=Text(" 🎙 RESULTADO ", style="bold #39ff88"), title_align="left",
+                        border_style="#39ff88" if not r["problems"] else "#ffd60a", box=box.ROUNDED, padding=(1, 2)))
 
 
 def dispatch(text: str, speak: bool = False) -> bool:
@@ -419,7 +533,10 @@ def dispatch(text: str, speak: bool = False) -> bool:
     elif low in ("/cls", "/clearscreen"):
         console.clear()
     elif low.startswith("/voice"):
-        toggle_voice(not low.endswith("off"))
+        if low.endswith("test"):
+            voice_test()
+        else:
+            toggle_voice(not low.endswith("off"))
     elif low == "/help":
         console.print(Panel(Markdown(core.HELP), title=agent_title("jarvis"), title_align="left",
                             border_style=core.AGENTS["jarvis"]["color"], box=box.ROUNDED))
@@ -434,7 +551,7 @@ def toolbar():
     t = telemetry.snapshot()
     gpu = (f" │ GPU <b>{t['gpu_util']:>3}%</b> │ VRAM <b>{t['vram_used_gb']:.1f}/{t['vram_total_gb']:.0f}G</b>"
            f" │ <b>{t['gpu_temp']}°C</b>") if "gpu_util" in t else ""
-    voice = " │ 🎙" if state.voice else ""
+    voice = " │ 🎙 <b>F2</b> falar" if state.voice else " │ 🎙 /voice on"
     return HTML(f" ⚡ CPU <b>{t['cpu']:>4.0f}%</b> │ RAM <b>{t['ram_used_gb']:.0f}/{t['ram_total_gb']:.0f}G</b>"
                 f"{gpu}{voice} │ <style bg='#b0001e' fg='white'><b> F1 </b></style> PARADA ")
 
@@ -455,6 +572,11 @@ def interactive() -> None:
     def _(event):                       # sem hook global (ex.: --no-hotkey), o F1 do prompt ainda funciona
         if not state.hotkey:
             threading.Thread(target=emergency_stop, args=("F1",), daemon=True).start()
+
+    @kb.add("f2")
+    def _(event):                       # push-to-talk com o terminal em foco (se o hook global faltar)
+        if state.voice and getattr(state, "ptt_handle", None) is None:
+            state.voice.listen_now()
 
     style = Style.from_dict({
         "prompt": "bold #00e5ff", "sep": "#2a5bff bold",
