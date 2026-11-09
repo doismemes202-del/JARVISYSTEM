@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>J.A.R.V.I.S // HUD</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#000; --panel:rgba(0,30,34,.55); --line:rgba(0,255,234,.22);
+    --cyan:#00ffea; --green:#39ff88; --dim:#3d8a85; --amber:#ffc94a; --red:#ff2d55;
+    --font:"JetBrains Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--cyan);font-family:var(--font);overflow:hidden}
+  body{display:flex;flex-direction:column;height:100dvh;padding:env(safe-area-inset-top) 10px env(safe-area-inset-bottom)}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:50;
+    background:repeating-linear-gradient(0deg,rgba(0,255,234,.035) 0 1px,transparent 1px 3px)}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:49;
+    background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.75))}
+
+  header{display:flex;align-items:center;gap:12px;padding:10px 4px 8px;border-bottom:1px solid var(--line)}
+  .reactor{width:34px;height:34px;border-radius:50%;flex:none;position:relative;
+    background:radial-gradient(circle,#fff 0 12%,var(--cyan) 22%,rgba(0,255,234,.15) 48%,transparent 70%);
+    box-shadow:0 0 18px var(--cyan),inset 0 0 8px var(--cyan);animation:pulse 2.4s ease-in-out infinite}
+  .reactor::after{content:"";position:absolute;inset:3px;border-radius:50%;border:2px dashed rgba(0,255,234,.6);animation:spin 9s linear infinite}
+  @keyframes pulse{50%{box-shadow:0 0 30px var(--cyan),inset 0 0 14px var(--cyan)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .brand{flex:1;min-width:0}
+  .brand h1{font-family:Orbitron,sans-serif;font-weight:800;font-size:clamp(15px,4vw,22px);letter-spacing:.32em;
+    text-shadow:0 0 10px var(--cyan)}
+  .brand small{display:block;font-size:10px;color:var(--dim);letter-spacing:.18em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #conn{font-size:10px;letter-spacing:.15em;padding:4px 8px;border:1px solid var(--line);border-radius:3px;white-space:nowrap}
+  #conn.on{color:var(--green);border-color:var(--green);box-shadow:0 0 8px rgba(57,255,136,.4)}
+  #conn.off{color:var(--red);border-color:var(--red)}
+  #kill{font-family:Orbitron,sans-serif;font-weight:800;font-size:13px;letter-spacing:.12em;color:#fff;
+    background:linear-gradient(180deg,#ff3b5f,#a3001d);border:2px solid #ff8197;border-radius:6px;
+    padding:10px 14px;cursor:pointer;box-shadow:0 0 16px rgba(255,45,85,.7),inset 0 -3px 0 rgba(0,0,0,.35);
+    text-shadow:0 0 6px #000;flex:none;touch-action:manipulation}
+  #kill:active{transform:translateY(2px);box-shadow:0 0 30px var(--red)}
+
+  #telemetry{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:8px 0}
+  .gauge{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 8px;min-width:0;position:relative;overflow:hidden}
+  .gauge label{font-size:9px;letter-spacing:.2em;color:var(--dim);display:block}
+  .gauge b{font-size:15px;font-weight:600;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gauge i{position:absolute;left:0;bottom:0;height:3px;width:0;background:var(--cyan);box-shadow:0 0 8px var(--cyan);transition:width .6s,background .6s}
+  .gauge i.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .gauge i.crit{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+  #agents{display:flex;gap:6px;flex-wrap:wrap;padding-bottom:8px}
+  .agent{font-size:10px;letter-spacing:.14em;padding:4px 8px;border:1px solid var(--line);border-radius:2px;color:var(--dim);transition:.25s}
+  .agent.busy{color:#000;background:var(--c,var(--cyan));border-color:var(--c,var(--cyan));box-shadow:0 0 12px var(--c,var(--cyan));animation:blink .8s infinite}
+  @keyframes blink{50%{opacity:.6}}
+  #models{font-size:10px;color:var(--dim);margin-left:auto;align-self:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+
+  #termwrap{flex:1;min-height:0;border:1px solid var(--line);border-radius:4px;background:rgba(0,10,12,.8);
+    padding:6px;box-shadow:inset 0 0 30px rgba(0,255,234,.06)}
+  #term{height:100%}
+
+  form{display:flex;gap:8px;padding:8px 0 10px}
+  #cmd{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:4px;color:var(--green);
+    font:16px var(--font);padding:12px;outline:none}
+  #cmd:focus{border-color:var(--cyan);box-shadow:0 0 10px rgba(0,255,234,.35)}
+  form button{background:transparent;border:1px solid var(--cyan);color:var(--cyan);border-radius:4px;
+    font:600 13px Orbitron,sans-serif;letter-spacing:.12em;padding:0 16px;cursor:pointer}
+  #quick{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+  #quick button{flex:none;background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:12px;
+    font:11px var(--font);padding:5px 10px;cursor:pointer}
+  #quick button:active{color:var(--cyan);border-color:var(--cyan)}
+
+  #halt{position:fixed;inset:0;z-index:100;display:none;place-items:center;text-align:center;
+    background:rgba(40,0,6,.92);color:var(--red);font-family:Orbitron,sans-serif}
+  #halt.show{display:grid}
+  #halt h2{font-size:clamp(26px,8vw,64px);letter-spacing:.2em;text-shadow:0 0 25px var(--red);animation:blink .6s infinite}
+  #halt p{font-family:var(--font);color:#ffb3c0;margin-top:12px;font-size:13px}
+
+  @media (max-width:640px){
+    #telemetry{grid-template-columns:repeat(3,1fr)}
+    .gauge.opt{display:none}
+    .brand small{display:none}
+    #models{display:none}
+    #kill{padding:9px 10px;font-size:12px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="reactor" aria-hidden="true"></div>
+  <div class="brand">
+    <h1>J.A.R.V.I.S</h1>
+    <small>MONDAY · ROMEU · PAPA · PLATO · FRIDAY QA</small>
+  </div>
+  <span id="conn" class="off">OFFLINE</span>
+  <button id="kill" title="Kill switch — encerra todo o sistema">☠ KILL (F1)</button>
+</header>
+
+<section id="telemetry">
+  <div class="gauge"><label>CPU</label><b id="g-cpu">--</b><i id="b-cpu"></i></div>
+  <div class="gauge"><label>RAM</label><b id="g-ram">--</b><i id="b-ram"></i></div>
+  <div class="gauge"><label>GPU</label><b id="g-gpu">--</b><i id="b-gpu"></i></div>
+  <div class="gauge opt"><label>VRAM</label><b id="g-vram">--</b><i id="b-vram"></i></div>
+  <div class="gauge opt"><label>TEMP · PWR</label><b id="g-temp">--</b><i id="b-temp"></i></div>
+</section>
+
+<nav id="agents">
+  <span class="agent" data-a="jarvis" style="--c:#00ffea">JARVIS</span>
+  <span class="agent" data-a="monday" style="--c:#ff5fd2">MONDAY</span>
+  <span class="agent" data-a="romeu" style="--c:#ffc94a">ROMEU</span>
+  <span class="agent" data-a="papa" style="--c:#4aa8ff">PAPA</span>
+  <span class="agent" data-a="plato" style="--c:#b48cff">PLATO</span>
+  <span class="agent" data-a="friday" style="--c:#39ff88">FRIDAY</span>
+  <span id="models"></span>
+</nav>
+
+<div id="termwrap"><div id="term"></div></div>
+
+<form id="f" autocomplete="off">
+  <input id="cmd" placeholder="Fale com o JARVIS…  (/help)" enterkeyhint="send" autocapitalize="off">
+  <button>ENVIAR</button>
+</form>
+<div id="quick">
+  <button data-c="/status">/status</button>
+  <button data-c="/help">/help</button>
+  <button data-c="/send">/send</button>
+  <button data-c="/cancel">/cancel</button>
+  <button data-c="/clear">/clear</button>
+  <button data-c="/bom ">/bom</button>
+  <button data-c="/fusion placa c=100 l=60 e=5 furo=5 margem=8">/fusion placa</button>
+</div>
+
+<div id="halt"><div><h2>SYSTEM HALTED</h2><p id="halt-why">Kill switch acionado.</p></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+(() => {
+  const TOKEN = new URLSearchParams(location.search).get("token") || (() => {
+    try { return localStorage.getItem("jarvis_token") || ""; } catch { return ""; }
+  })();
+  try { if (TOKEN) localStorage.setItem("jarvis_token", TOKEN); } catch {}
+
+  // ---------------------------------------------------------------- terminal
+  const term = new Terminal({
+    convertEol: true, cursorBlink: false, disableStdin: true, scrollback: 5000,
+    fontFamily: '"JetBrains Mono", Consolas, monospace', fontSize: innerWidth < 640 ? 12 : 14,
+    theme: { background: "#00000000", foreground: "#bffcf6", cursor: "#00ffea",
+             selectionBackground: "#00ffea55", black: "#000", cyan: "#00ffea", green: "#39ff88",
+             brightBlack: "#3d8a85", yellow: "#ffc94a", red: "#ff2d55", magenta: "#ff5fd2",
+             blue: "#4aa8ff", brightMagenta: "#b48cff" },
+    allowTransparency: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  const refit = () => { try { fit.fit(); } catch {} };
+  refit(); addEventListener("resize", refit); new ResizeObserver(refit).observe(document.getElementById("termwrap"));
+
+  const C = { reset:"\x1b[0m", dim:"\x1b[90m", cyan:"\x1b[36m", green:"\x1b[32m", yellow:"\x1b[33m",
+              red:"\x1b[31m", mag:"\x1b[35m", blue:"\x1b[34m", purple:"\x1b[95m", bold:"\x1b[1m" };
+  const AGENT_COLOR = { jarvis:C.cyan, monday:C.mag, romeu:C.yellow, papa:C.blue, plato:C.purple, friday:C.green };
+  const LEVEL_COLOR = { DEBUG:C.dim, INFO:C.dim, WARNING:C.yellow, ERROR:C.red, CRITICAL:C.red+C.bold };
+
+  const colorize = (text) => text
+    .replace(/(🛡️[^\n]*PASSED\])/g, C.green + C.bold + "$1" + C.reset)
+    .replace(/(🛡️[^\n]*CORRECTED\])/g, C.yellow + C.bold + "$1" + C.reset)
+    .replace(/(⚠️[^\n]*)/g, C.yellow + "$1" + C.reset)
+    .replace(/(💡 Telemetria do Jarvis:?)/g, C.cyan + C.bold + "$1" + C.reset)
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_, l, code) => C.dim + "┌─ " + (l || "code") + C.reset + "\n" +
+        code.split("\n").map(x => C.dim + "│ " + C.reset + C.green + x + C.reset).join("\n") + "\n" + C.dim + "└─" + C.reset);
+
+  function render(m) {
+    const ts = C.dim + (m.ts || "") + C.reset + " ";
+    switch (m.type) {
+      case "log":
+        term.writeln(ts + (LEVEL_COLOR[m.level] || C.dim) + `[${m.name}] ${m.text}` + C.reset); break;
+      case "user":
+        term.writeln("\r\n" + ts + C.green + C.bold + (m.source === "voice" ? "🎙 VOCÊ › " : "VOCÊ › ") + C.reset + C.green + m.text + C.reset); break;
+      case "response": {
+        const col = AGENT_COLOR[m.agent] || C.cyan;
+        term.writeln(ts + col + C.bold + "◆ " + (m.agent || "jarvis").toUpperCase() + C.reset);
+        term.writeln(colorize(m.text));
+        if (m.meta) term.writeln(C.dim + "  ⏱ " + m.meta + C.reset);
+        term.writeln("");
+        break;
+      }
+      case "kill":
+        term.writeln("\r\n" + C.red + C.bold + "☠☠☠ KILL SWITCH: " + m.reason + " ☠☠☠" + C.reset);
+        document.getElementById("halt-why").textContent = "Origem: " + m.reason;
+        document.getElementById("halt").classList.add("show");
+        if (/IDLE/.test(m.reason)) {          // modo CLI: parada de emergência → volta ao IDLE
+          setTimeout(() => document.getElementById("halt").classList.remove("show"), 2500);
+          killedSoft = true;
+        } else killed = true;
+        break;
+      case "agent":
+        document.querySelectorAll(`.agent[data-a="${m.agent}"]`).forEach(e => e.classList.toggle("busy", m.state === "busy"));
+        break;
+      case "telemetry": telemetry(m); break;
+    }
+  }
+
+  // ---------------------------------------------------------------- telemetria
+  const set = (id, txt, pct) => {
+    document.getElementById("g-" + id).textContent = txt;
+    const bar = document.getElementById("b-" + id);
+    bar.style.width = Math.min(100, pct || 0) + "%";
+    bar.className = pct >= 90 ? "crit" : pct >= 75 ? "warn" : "";
+  };
+  function telemetry(t) {
+    set("cpu", t.cpu.toFixed(0) + "%", t.cpu);
+    set("ram", `${t.ram_used_gb}/${t.ram_total_gb}G`, t.ram_pct);
+    if (t.gpu_util !== undefined) {
+      set("gpu", t.gpu_util + "%", t.gpu_util);
+      set("vram", `${t.vram_used_gb}/${t.vram_total_gb}G`, t.vram_pct);
+      set("temp", `${t.gpu_temp}°C${t.gpu_power_w ? " · " + t.gpu_power_w.toFixed(0) + "W" : ""}`, t.gpu_temp);
+    }
+    const mods = (t.models || []).map(m => `${m.name} ${m.vram_gb}G`).join(" · ");
+    document.getElementById("models").textContent =
+      (t.ollama ? "OLLAMA ● " : "OLLAMA ○ ") + (mods || "sem modelos na VRAM") + (t.voice ? " · 🎙" : "");
+  }
+
+  // ---------------------------------------------------------------- websocket
+  let ws, killed = false, killedSoft = false, retry = 0;
+  const conn = document.getElementById("conn");
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+    ws.onopen = () => { retry = 0; conn.textContent = "ONLINE"; conn.className = "on"; };
+    ws.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (err) { console.error(err); } };
+    ws.onclose = (e) => {
+      conn.textContent = "OFFLINE"; conn.className = "off";
+      if (e.code === 4401 || e.code === 1008) {
+        term.writeln(C.red + "Acesso negado: abra o link com ?token=<JARVIS_TOKEN>." + C.reset); return;
+      }
+      if (!killed) setTimeout(connect, Math.min(8000, 800 * 2 ** retry++));
+    };
+  }
+
+  term.writeln(C.cyan + C.bold + "  ╔═══════════════════════════════════════╗");
+  term.writeln("  ║   J.A.R.V.I.S  //  WEB TERMINAL v1.0  ║");
+  term.writeln("  ╚═══════════════════════════════════════╝" + C.reset);
+  term.writeln(C.dim + "  Conectando ao núcleo…  digite /help" + C.reset + "\r\n");
+  connect();
+
+  // ---------------------------------------------------------------- entrada
+  const input = document.getElementById("cmd");
+  const history = []; let hIdx = -1;
+  function send(text) {
+    if (!text.trim()) return;
+    if (!ws || ws.readyState !== 1) { term.writeln(C.red + "Sem conexão com o núcleo." + C.reset); return; }
+    ws.send(JSON.stringify({ type: "cmd", text }));
+    history.unshift(text); hIdx = -1;
+  }
+  document.getElementById("f").addEventListener("submit", (e) => { e.preventDefault(); send(input.value); input.value = ""; });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp" && history.length) { hIdx = Math.min(hIdx + 1, history.length - 1); input.value = history[hIdx]; e.preventDefault(); }
+    if (e.key === "ArrowDown") { hIdx = Math.max(hIdx - 1, -1); input.value = hIdx < 0 ? "" : history[hIdx]; e.preventDefault(); }
+  });
+  document.querySelectorAll("#quick button").forEach(b => b.addEventListener("click", () => {
+    const c = b.dataset.c;
+    if (c.endsWith(" ")) { input.value = c; input.focus(); } else send(c);
+  }));
+
+  document.getElementById("kill").addEventListener("click", async () => {
+    if (!confirm("☠ ACIONAR KILL SWITCH?\nEncerra Python, Ollama, Open Interpreter e navegadores automatizados.")) return;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cmd", text: "kill" }));
+    else fetch(`/api/kill?token=${encodeURIComponent(TOKEN)}`, { method: "POST" }).catch(() => {});
+    document.getElementById("halt").classList.add("show");
+  });
+})();
+</script>
+</body>
+</html>

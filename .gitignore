@@ -1,0 +1,17 @@
+# --- Segredos: NUNCA publicar ---
+.env
+credentials/
+data/contacts.json
+data/.cli_history
+
+# --- Ambientes e runtimes (recriados pelo setup.ps1) ---
+.venv/
+.venv-oi/
+.python/
+
+# --- Arquivos grandes baixados pelo setup.ps1 ---
+voices/
+
+# --- Python ---
+__pycache__/
+*.pyc

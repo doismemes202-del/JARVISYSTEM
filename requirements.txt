@@ -1,0 +1,15 @@
+# Interface de terminal (CLI)
+rich
+prompt_toolkit
+# Núcleo: servidor web de apoio, telemetria, kill switch e integrações
+fastapi
+uvicorn[standard]
+websockets
+psutil
+nvidia-ml-py
+keyboard
+requests
+gspread
+google-auth
+pywhatkit
+# open-interpreter: instalar num venv Python 3.11 separado (ver README / setup.ps1)

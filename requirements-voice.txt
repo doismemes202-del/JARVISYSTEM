@@ -1,0 +1,10 @@
+# Pipeline de voz: openWakeWord + Faster-Whisper (CUDA 12) + Piper TTS
+numpy
+sounddevice
+openwakeword
+onnxruntime
+faster-whisper
+piper-tts
+# DLLs CUDA 12 / cuDNN 9 usadas pelo CTranslate2 (Faster-Whisper) no Windows
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
