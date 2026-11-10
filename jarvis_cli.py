@@ -51,7 +51,7 @@ QA_STYLE = {
 }
 LOCAL_COMMANDS = ["/status", "/agents", "/kill", "/shutdown", "/voice on", "/voice off", "/voice test",
                   "/cls", "/exit"]
-ENGINE_COMMANDS = ["/help", "/clear", "/agent ", "/bom ", "/zapbom ", "/zap ", "/send", "/cancel",
+ENGINE_COMMANDS = ["/help", "/clear", "/agent ", "/bom ", "/zapbom ", "/zap ", "/zap! ", "/send", "/cancel",
                    "/whatsapp ", "/fusion placa c=100 l=60 e=5 furo=5 margem=8", "/fusion ", "/os "]
 
 
@@ -386,9 +386,21 @@ def run(text: str, speak: bool = False) -> None:
         log.exception("Falha interna", exc_info=err)
         render_error(f"{type(err).__name__}: {err}", "FALHA INTERNA")
     elif "reply" in box_:
-        render_reply(box_["reply"])
+        reply = box_["reply"]
+        render_reply(reply)
         if speak and state.voice:
-            threading.Thread(target=state.voice.say, args=(box_["reply"].body,), daemon=True).start()
+            threading.Thread(target=speak_reply, args=(reply,), daemon=True).start()
+
+
+def speak_reply(reply) -> None:
+    """Fala a resposta. Se for um rascunho de WhatsApp, lê a mensagem e já abre o microfone
+    para você responder "confirmar" ou "cancelar" (sem precisar de F2 nem do "Hey Jarvis")."""
+    voice = state.voice
+    if not voice:
+        return
+    voice.say(reply.extra.get("speech") or reply.body)
+    if reply.extra.get("await_confirm"):
+        voice.listen_now()
 
 
 PTT_KEY = "f2"

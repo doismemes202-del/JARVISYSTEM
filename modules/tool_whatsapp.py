@@ -4,7 +4,13 @@ Requisitos: WhatsApp Web já logado no navegador padrão e o PC desbloqueado
 (o pywhatkit abre a conversa e usa o teclado para enviar).
 
 Política de segurança: mensagens REDIGIDAS pela IA ficam pendentes até o usuário
-confirmar com /send. Só o comando /whatsapp (texto literal do usuário) envia direto.
+confirmar com /send (ou dizendo "confirmar" por voz). Envio direto só em dois casos:
+  - /whatsapp: texto literal do usuário;
+  - /zap!: rascunho da IA, mas SOMENTE para contatos marcados com "auto": true no contacts.json.
+
+contacts.json aceita os dois formatos:
+  {"mae": "+5511999998888",
+   "fornecedor": {"telefone": "+5511977776666", "auto": true}}
 """
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ import json
 import logging
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass
 
 from . import config
@@ -30,13 +37,51 @@ class PendingMessage:
 _pending: PendingMessage | None = None
 
 
+@dataclass
+class Contact:
+    name: str
+    phone: str
+    auto: bool = False          # liberado para envio automático (/zap!)
+
+
+def _key(name: str) -> str:
+    """'Mãe' == 'mae' == ' MAE '."""
+    return unicodedata.normalize("NFKD", name.strip().lower()).encode("ascii", "ignore").decode()
+
+
+def load_contact_book() -> dict[str, Contact]:
+    if not config.CONTACTS_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(config.CONTACTS_FILE.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        log.warning("contacts.json inválido: %s", e)
+        return {}
+    book = {}
+    for name, v in raw.items():
+        if name.startswith("_"):                       # chaves de comentário
+            continue
+        if isinstance(v, dict):
+            phone = v.get("telefone") or v.get("phone") or ""
+            auto = bool(v.get("auto", False))
+        else:
+            phone, auto = str(v), False
+        if phone:
+            book[_key(name)] = Contact(name, phone, auto)
+    return book
+
+
 def load_contacts() -> dict[str, str]:
-    if config.CONTACTS_FILE.exists():
-        try:
-            return {k.lower(): v for k, v in json.loads(config.CONTACTS_FILE.read_text(encoding="utf-8")).items()}
-        except Exception as e:
-            log.warning("contacts.json inválido: %s", e)
-    return {}
+    return {k: c.phone for k, c in load_contact_book().items()}
+
+
+def contact_names() -> list[str]:
+    return [c.name for c in load_contact_book().values()]
+
+
+def is_auto(target: str) -> bool:
+    c = load_contact_book().get(_key(target))
+    return bool(c and c.auto)
 
 
 def normalize_phone(raw: str) -> str:
@@ -53,9 +98,9 @@ def normalize_phone(raw: str) -> str:
 def resolve(target: str) -> tuple[str, str]:
     """Contato (contacts.json) ou número → (telefone, rótulo)."""
     target = target.strip()
-    contacts = load_contacts()
-    if target.lower() in contacts:
-        return normalize_phone(contacts[target.lower()]), target
+    c = load_contact_book().get(_key(target))
+    if c:
+        return normalize_phone(c.phone), c.name
     if re.search(r"\d{8,}", re.sub(r"\D", "", target)):
         phone = normalize_phone(target)
         return phone, phone

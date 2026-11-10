@@ -142,6 +142,59 @@ def guess_tipo(text: str, role: str) -> str:
     return "texto" if _LONG_RE.search(norm(text)) or len(text) > 160 else "conversa"
 
 
+# ------------------------------------------------------------------ mensagens por voz / texto livre
+_MSG_RE = re.compile(r"\b(mand[ae]r?|envi[ae]r?|avis[ae]r?|fala pr|diz pr|diga pr|escrev[ae] pr|"
+                     r"manda (um|uma)|mensagem pr|zap pr|whats(app)? pr)")
+_CONFIRM = {"confirmar", "confirma", "confirmo", "confirmado", "enviar", "envia", "envie", "pode enviar",
+            "pode mandar", "manda", "mande", "sim", "sim manda", "sim envia", "sim pode mandar",
+            "ok envia", "ok manda", "manda ai", "envia ai", "send"}
+_CANCEL = {"cancelar", "cancela", "cancele", "nao", "nao manda", "nao envia", "descarta", "descartar",
+           "esquece", "deixa", "deixa pra la", "cancel"}
+
+
+def is_message_request(text: str) -> bool:
+    """'Monday, manda pra mãe que vou atrasar' / 'avisa o fornecedor que...'."""
+    return bool(_MSG_RE.search(norm(text)))
+
+
+def pending_answer(text: str) -> str | None:
+    """Resposta curta a um rascunho pendente: 'send', 'cancel' ou None (outro assunto)."""
+    t = re.sub(r"[^a-z ]", " ", norm(text))
+    t = re.sub(r"^\s*(ei |hey |ok )?(jarvis|monday)\b", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t or len(t.split()) > 4:
+        return None
+    t = re.sub(r"\b(por favor|pf|entao|agora)\b", "", t).strip()
+    if t in _CONFIRM:
+        return "send"
+    if t in _CANCEL:
+        return "cancel"
+    return None
+
+
+EXTRACT_PROMPT = """\
+O usuário quer mandar uma mensagem de WhatsApp? Extraia do pedido abaixo:
+- "enviar": true se for um pedido para mandar/avisar/enviar mensagem a alguém.
+- "contato": o destinatário EXATAMENTE como o usuário falou (ex.: "mãe", "Carlos", "o fornecedor" → "fornecedor"). \
+Nunca troque por outro nome.
+- "pedido": o que a mensagem deve dizer, em uma frase.
+Pedido: {text}"""
+EXTRACT_SCHEMA = {"type": "object", "properties": {"enviar": {"type": "boolean"}, "contato": {"type": "string"},
+                                                   "pedido": {"type": "string"}},
+                  "required": ["enviar", "contato", "pedido"]}
+
+
+def match_contact(spoken: str, text: str, names: list[str]) -> str | None:
+    """Só aceita um contato que o usuário realmente falou (o modelo não pode 'trocar' Carlos por Mãe)."""
+    said = norm(text)
+    for name in [spoken, *names]:
+        key = norm(name).strip()
+        if key and re.search(rf"\b{re.escape(key)}\b", said):
+            if any(norm(n) == key for n in names):
+                return next(n for n in names if norm(n) == key)
+    return None
+
+
 def needs_review(role: str, question: str, answer: str, tipo: str = "") -> bool:
     """FRIDAY_MODE=smart: só audita o que tem risco técnico real."""
     from . import config as _cfg
@@ -171,6 +224,8 @@ HELP = """\
 | `/bom <projeto> \\| <descrição>` | PLATO gera BOM cotada → FRIDAY → Google Sheets |
 | `/zapbom <contato\\|+55...>` | prepara o relatório da última BOM para WhatsApp |
 | `/zap <contato\\|+55...> \\| <pedido>` | MONDAY redige → FRIDAY revisa → aguarda `/send` |
+| `/zap! <contato> \\| <pedido>` | igual ao /zap, mas envia direto se o contato tiver `"auto": true` |
+| “Monday, manda pra mãe que…” | por voz ou texto: rascunho → diga “confirmar” ou “cancelar” |
 | `/send` · `/cancel` | confirma ou descarta a mensagem pendente |
 | `/whatsapp <+55...> <texto>` | envia o texto literal imediatamente |
 | `/fusion placa c=100 l=60 e=5 furo=5 margem=8` | script parametrizado (template) |
@@ -245,8 +300,18 @@ class Engine:
             raise ValueError("Comando vazio.")
         with self.lock:
             self.cancel.clear()              # limpa só depois de obter a GPU (F1 antigo não vaza)
+            if tool_whatsapp.get_pending():  # "confirmar" / "cancelar" falado ou digitado
+                answer = pending_answer(text)
+                if answer == "send":
+                    return self.send(progress)
+                if answer == "cancel":
+                    return self.cancel_pending()
             if text.startswith("/"):
                 return self._slash(text, progress)
+            if is_message_request(text):
+                reply = self.message_from_speech(text, progress)
+                if reply:
+                    return reply
             return self.converse(text, progress)
 
     # ------------------------------------------------------------------ helpers
@@ -410,6 +475,7 @@ class Engine:
             "/bom": lambda: self.bom(arg, progress),
             "/zapbom": lambda: self.zapbom(arg),
             "/zap": lambda: self.zap(arg, progress),
+            "/zap!": lambda: self.zap(arg, progress, auto=True),
             "/send": lambda: self.send(progress),
             "/cancel": self.cancel_pending,
             "/whatsapp": lambda: self.whatsapp(arg, progress),
@@ -468,19 +534,66 @@ class Engine:
         return Reply("monday", f"Relatório pronto para **{label}** ({phone}):\n\n```text\n{msg}\n```\n\n"
                                f"Digite `/send` para enviar ou `/cancel`.", extra={"pending": True})
 
-    def zap(self, arg: str, progress: Progress) -> Reply:
+    def zap(self, arg: str, progress: Progress, auto: bool = False) -> Reply:
         dest, _, ask = arg.partition("|")
         if not ask.strip():
-            raise ValueError("Uso: /zap <contato|+55...> | <o que dizer>")
+            raise ValueError(f"Uso: /zap{'!' if auto else ''} <contato|+55...> | <o que dizer>")
+        return self._draft_message(dest.strip(), ask.strip(), progress, auto=auto)
+
+    def _draft_message(self, dest: str, ask: str, progress: Progress, *, auto: bool = False) -> Reply:
+        """MONDAY redige → FRIDAY revisa → envia (auto + contato liberado) ou deixa pendente."""
         phone, label = tool_whatsapp.resolve(dest)
-        res = self._llm("monday", ZAP_DIRECTIVE.format(dest=label, ask=ask.strip()), progress, "Redigindo mensagem")
+        res = self._llm("monday", ZAP_DIRECTIVE.format(dest=label, ask=ask), progress, "Redigindo mensagem")
         draft = llm.strip_telemetry_all(llm.strip_think(res["content"])).strip('"')
         rr = self._friday(draft, "whatsapp", ask, progress)
         final = llm.strip_telemetry_all(rr.text).strip('"')
+        meta = self._perf("MONDAY", res, rr)
+
+        if auto and tool_whatsapp.is_auto(dest):
+            progress("monday", f"[MONDAY] Enviando WhatsApp para {label}")
+            tool_whatsapp.send_message(phone, final)
+            return Reply("monday", f"✅ Enviado automaticamente para **{label}** ({phone}):\n\n```text\n{final}\n```",
+                         rr.status, rr.badge, meta=meta,
+                         extra={"speech": f"Mensagem enviada para {label}."})
+
         tool_whatsapp.set_pending(phone, label, final)
+        why = ""
+        if auto:
+            why = (f"\n\n⚠️ **{label}** não está liberado para envio automático. Para liberar, marque "
+                   f'`"auto": true` nesse contato em `data/contacts.json`.')
         return Reply("monday", f"Rascunho para **{label}** ({phone}):\n\n```text\n{final}\n```\n\n"
-                               f"Digite `/send` para enviar ou `/cancel`.",
-                     rr.status, rr.badge, meta=self._perf("MONDAY", res, rr), extra={"pending": True})
+                               f"Digite `/send` ou diga **“confirmar”** para enviar; `/cancel` ou “cancelar” "
+                               f"para descartar.{why}",
+                     rr.status, rr.badge, meta=meta,
+                     extra={"pending": True, "await_confirm": True,
+                            "speech": f"Rascunho para {label}: {final}. Diga confirmar para enviar, "
+                                      f"ou cancelar."})
+
+    def message_from_speech(self, text: str, progress: Progress) -> Reply | None:
+        """'Monday, manda pra mãe que vou atrasar' → rascunho pendente (sempre com confirmação)."""
+        names = tool_whatsapp.contact_names()
+        progress("monday", "[MONDAY] Entendendo o pedido de mensagem")
+        try:
+            res = llm.chat(config.JARVIS_MODEL, [{"role": "user", "content": EXTRACT_PROMPT.format(text=text)}],
+                           fmt=EXTRACT_SCHEMA,
+                options={"temperature": 0, "num_predict": 120}, cancel=self.cancel, think=False, timeout=60)
+            data = json.loads(res["content"])
+        except llm.Cancelled:
+            raise
+        except Exception as e:
+            log.info("Extração de mensagem falhou (%s) — seguindo como conversa.", e)
+            return None
+        if not data.get("enviar") or not data.get("contato", "").strip():
+            return None
+        spoken, ask = data["contato"].strip(), (data.get("pedido") or text).strip()
+        dest = match_contact(spoken, text, names)
+        if not dest:
+            dest = spoken
+            known = ", ".join(names) or "nenhum ainda"
+            return Reply("monday", f"Não achei **{dest}** nos contatos. Cadastre em `data/contacts.json` "
+                                   f"(contatos atuais: {known}) ou use `/zap +55DDDNÚMERO | {ask}`.",
+                         extra={"speech": f"Não encontrei {dest} nos contatos."})
+        return self._draft_message(dest, ask, progress, auto=False)
 
     def send(self, progress: Progress) -> Reply:
         p = tool_whatsapp.pop_pending()
@@ -488,11 +601,13 @@ class Engine:
             raise ValueError("Nenhuma mensagem pendente.")
         progress("monday", f"[MONDAY] Enviando WhatsApp para {p.label}")
         tool_whatsapp.send_message(p.phone, p.text)
-        return Reply("monday", f"✅ Mensagem enviada para **{p.label}** ({p.phone}).")
+        return Reply("monday", f"✅ Mensagem enviada para **{p.label}** ({p.phone}).",
+                     extra={"speech": f"Mensagem enviada para {p.label}."})
 
     def cancel_pending(self) -> Reply:
         p = tool_whatsapp.pop_pending()
-        return Reply("monday", "Mensagem descartada." if p else "Nada pendente.")
+        return Reply("monday", "Mensagem descartada." if p else "Nada pendente.",
+                     extra={"speech": "Mensagem descartada." if p else "Nada pendente."})
 
     def whatsapp(self, arg: str, progress: Progress) -> Reply:
         dest, _, body = arg.partition(" ")

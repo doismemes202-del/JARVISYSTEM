@@ -76,6 +76,8 @@ código são exibidos com destaque de sintaxe.
 | `/agent <nome> <texto>` | força um agente |
 | `/bom Projeto \| descrição` | PLATO → JSON → FRIDAY → tabela + aba no Google Sheets |
 | `/zap contato \| pedido` → `/send` | MONDAY redige → FRIDAY revisa → só envia após `/send` |
+| `/zap! contato \| pedido` | igual, mas envia sozinho se o contato tiver `"auto": true` |
+| “Monday, manda pra mãe que…” | por voz ou texto: rascunho → “confirmar” / “cancelar” |
 | `/zapbom contato` · `/whatsapp +55... texto` | relatório da BOM · envio literal |
 | `/fusion placa c=100 l=60 e=5 furo=5 margem=8` | script parametrizado na pasta Scripts do Fusion |
 | `/fusion <descrição>` | PAPA escreve o script → validação → FRIDAY → salva |
@@ -83,6 +85,35 @@ código são exibidos com destaque de sintaxe.
 | `/voice on\|off` · `/clear` · `/cls` · `/exit` | voz · memória · limpar tela · sair |
 | **F1** · `/kill` · Ctrl+C (durante geração) | ⛔ PARADA DE EMERGÊNCIA → IDLE |
 | `/shutdown` | encerra JARVIS, Ollama e ferramentas |
+
+## WhatsApp (MONDAY)
+
+O WhatsApp Web precisa estar logado no navegador padrão. O pywhatkit abre a conversa e envia em
+cerca de 20 s; não mexa no mouse nem no teclado nesse intervalo.
+
+Os contatos ficam em `data/contacts.json`, que não vai para o GitHub:
+
+```json
+{
+  "mae": "+5511999998888",
+  "fornecedor": {"telefone": "+5511977776666", "auto": true}
+}
+```
+
+| Forma de pedir | O que acontece |
+|---|---|
+| `/whatsapp mae Chego às 20h` | Envia o seu texto, exatamente como escrito, na hora. |
+| `/zap mae \| avisar que chego às 20h` | A MONDAY escreve e a FRIDAY revisa. Só envia com `/send` ou “confirmar”. |
+| `/zap! fornecedor \| pedido 123 chegou` | Envia sozinho **só** se o contato tiver `"auto": true`. Sem isso, vira rascunho e explica como liberar. |
+| Voz (F2 ou “Hey Jarvis”): “Monday, manda pra mãe que vou atrasar” | A MONDAY lê o rascunho em voz alta e já abre o microfone. Responda “confirmar” (ou “pode mandar”) ou “cancelar”. |
+
+Pedidos por voz **sempre** pedem confirmação, mesmo para contatos com `auto`, porque a transcrição
+pode errar. O contato precisa ser dito pelo nome cadastrado: se você falar um nome que não está no
+arquivo, a MONDAY avisa e não envia nada.
+
+```powershell
+.\.venv\Scripts\python tests\test_monday.py   # contatos falsos, envio simulado: nada sai de verdade
+```
 
 ## Parada de emergência
 

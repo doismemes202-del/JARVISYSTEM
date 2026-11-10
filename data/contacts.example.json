@@ -1,4 +1,5 @@
 {
+  "_ajuda": "Nome simples = só com confirmação (/send ou 'confirmar' por voz). Com \"auto\": true, o /zap! envia sem perguntar.",
   "joao": "+5511999990000",
-  "fornecedor": "+5511988880000"
+  "fornecedor": {"telefone": "+5511988880000", "auto": true}
 }

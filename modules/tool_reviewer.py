@@ -119,6 +119,15 @@ def review(content: str, kind: str = "geral", context: str = "", *,
         return ReviewResult("SKIPPED", content, str(e))
 
     out = llm.strip_think(res["content"])
+    if not out.strip():                 # resposta vazia (acontece às vezes) → tenta mais uma vez
+        try:
+            res = llm.chat(config.FRIDAY_MODEL, msgs, options={"temperature": 0.4},
+                           cancel=cancel, on_token=on_token, think=think)
+            out = llm.strip_think(res["content"])
+        except llm.LLMError as e:
+            log.warning("Friday falhou na nova tentativa: %s", e)
+        if not out.strip():
+            return ReviewResult("SKIPPED", content, "Friday não respondeu", res["seconds"])
     norm = _ascii(out)
     rejected = "[REPROVADO]" in norm
 
